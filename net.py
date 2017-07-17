@@ -16,15 +16,14 @@ from math import ceil
 import random
 from util import ProgressBar, Dataset, MAPs, MAPs_CQ
 from sklearn.cluster import MiniBatchKMeans
-tf.logging.set_verbosity(tf.logging.ERROR)
 
 
 class DVSQ(object):
-    def __init__(self, config):
+    def __init__(self, config, stage):
         ### Initialize setting
         print ("initializing")
         np.set_printoptions(precision=4)
-        self.stage = config['stage']
+        self.stage = stage
         self.device = config['device']
         self.output_dim = config['output_dim']
         self.n_class = config['label_dim']
@@ -82,8 +81,11 @@ class DVSQ(object):
             self.img = tf.placeholder(tf.float32, [self.batch_size, 256, 256, 3])
             self.img_label = tf.placeholder(tf.float32, [self.batch_size, self.n_class])
 
-            self.img_last_layer, self.img_output, self.C = \
-                self.load_model(config['model_weights'])
+            if self.stage == 'train':
+                model_weights = config['model_weights']
+            else:
+                model_weights = self.save_dir
+            self.img_last_layer, self.img_output, self.C = self.load_model(model_weights)
 
             ### Centers shared in different modalities (image & text)
             ### Binary codes for different modalities (image & text)
@@ -137,7 +139,23 @@ class DVSQ(object):
         width = IMAGE_SIZE
 
         ### Randomly crop a [height, width] section of each image
-        distorted_image = tf.stack([tf.random_crop(tf.image.random_flip_left_right(each_image), [height, width, 3]) for each_image in tf.unstack(reshaped_image)])
+        if self.stage == "train":
+            distorted_image = tf.stack([tf.random_crop(tf.image.random_flip_left_right(each_image), [height, width, 3]) for each_image in tf.unstack(reshaped_image)])
+        else:
+            ### Randomly crop a [height, width] section of each image
+            distorted_image1 = tf.stack([tf.image.crop_to_bounding_box(tf.image.flip_left_right(each_image), 0, 0, height, width) for each_image in tf.unstack(reshaped_image)])
+            distorted_image2 = tf.stack([tf.image.crop_to_bounding_box(tf.image.flip_left_right(each_image), 28, 28, height, width) for each_image in tf.unstack(reshaped_image)])
+            distorted_image3 = tf.stack([tf.image.crop_to_bounding_box(tf.image.flip_left_right(each_image), 28, 0, height, width) for each_image in tf.unstack(reshaped_image)])
+            distorted_image4 = tf.stack([tf.image.crop_to_bounding_box(tf.image.flip_left_right(each_image), 0, 28, height, width) for each_image in tf.unstack(reshaped_image)])
+            distorted_image5 = tf.stack([tf.image.crop_to_bounding_box(tf.image.flip_left_right(each_image), 14, 14, height, width) for each_image in tf.unstack(reshaped_image)])
+
+            distorted_image6 = tf.stack([tf.image.crop_to_bounding_box(each_image, 0, 0, height, width) for each_image in tf.unstack(reshaped_image)])
+            distorted_image7 = tf.stack([tf.image.crop_to_bounding_box(each_image, 28, 28, height, width) for each_image in tf.unstack(reshaped_image)])
+            distorted_image8 = tf.stack([tf.image.crop_to_bounding_box(each_image, 28, 0, height, width) for each_image in tf.unstack(reshaped_image)])
+            distorted_image9 = tf.stack([tf.image.crop_to_bounding_box(each_image, 0, 28, height, width) for each_image in tf.unstack(reshaped_image)])
+            distorted_image0 = tf.stack([tf.image.crop_to_bounding_box(each_image, 14, 14, height, width) for each_image in tf.unstack(reshaped_image)])
+
+            distorted_image = tf.concat([distorted_image1, distorted_image2, distorted_image3, distorted_image4, distorted_image5, distorted_image6, distorted_image7, distorted_image8, distorted_image9, distorted_image0], 0)
 
         ### Zero-mean input
         with tf.name_scope('preprocess') as scope:
@@ -295,7 +313,12 @@ class DVSQ(object):
                 fc8b = tf.Variable(tf.constant(0.0, shape=[self.output_dim],
                                                dtype=tf.float32), name='biases')
             fc8l = tf.nn.bias_add(tf.matmul(self.fc7, fc8w), fc8b)
-            self.fc8 = tf.nn.tanh(fc8l)
+            if self.stage == "train":
+                self.fc8 = tf.nn.tanh(fc8l)
+            else:
+                self.fc8_t = tf.nn.tanh(fc8l)
+                fc8_t = tf.concat([tf.expand_dims(i, 0) for i in tf.split(self.fc8_t, 10, 0)], 0)
+                self.fc8 = tf.reduce_mean(fc8_t, 0)
             fc8lo = tf.nn.bias_add(tf.matmul(self.fc7o, fc8w), fc8b)
             self.fc8o = tf.nn.tanh(fc8lo)
             self.deep_param_img['fc8'] = [fc8w, fc8b]
@@ -321,6 +344,20 @@ class DVSQ(object):
         for layer in self.deep_param_img:
             model[layer] = self.sess.run(self.deep_param_img[layer])
         print ("saving model to %s" % model_file)
+        np.save(model_file, np.array(model))
+        return
+
+    def save_codes(self, database, query, C, model_file=None):
+        if model_file == None:
+            model_file = self.model_weights + "_codes.npy"
+        model = {}
+        model['db_features'] = database.output
+        model['db_reconstr'] = np.dot(database.codes, C)
+        model['db_label'] = database.label
+        model['val_features'] = query.output
+        model['val_reconstr'] = np.dot(query.codes, C)
+        model['val_label'] = query.label
+        print ("saving codes to %s" % model_file)
         np.save(model_file, np.array(model))
         return
 
@@ -479,7 +516,7 @@ class DVSQ(object):
         self.cq_loss_img = tf.reduce_mean(tf.reduce_sum(tf.square(tf.matmul(tf.subtract(self.img_last_layer, tf.matmul(self.b_img, self.C)), tf.transpose(word_dict))), 1))
         self.q_lambda = tf.Variable(self.cq_lambda, name='cq_lambda')
         self.cq_loss = tf.multiply(self.q_lambda, self.cq_loss_img)
-        self.loss = self.cos_loss + self.cq_loss + self.graph_laplacian_loss
+        self.loss = self.cos_loss + self.cq_loss # + self.graph_laplacian_loss
 
         ### Last layer has a 10 times learning rate
         self.lr = tf.train.exponential_decay(self.learning_rate, global_step, self.decay_step, self.learning_rate_decay_factor, staircase=True)
@@ -499,7 +536,7 @@ class DVSQ(object):
         self.merged = tf.summary.merge_all()
 
 
-        if self.finetune_all:
+        if self.stage == "train" and self.finetune_all:
             return opt.apply_gradients([(grads_and_vars[0][0], self.train_layers[0]),
                                         (grads_and_vars[1][0]*2, self.train_layers[1]),
                                         (grads_and_vars[2][0], self.train_layers[2]),
@@ -557,11 +594,6 @@ class DVSQ(object):
         C_zeros_ids = np.where(C_sums < 1e-8)
         C_value[C_zeros_ids, :] = old_C_value[C_zeros_ids, :]
         self.sess.run(self.C.assign(C_value))
-
-        # print 'updated C is:'
-        # print C_value
-        # print "non zeros:"
-        # print len(np.where(np.sum(C_value, 1) != 0)[0])
 
     def update_codes_ICM(self, output, code):
         '''
@@ -659,9 +691,61 @@ class DVSQ(object):
         self.save_model()
         print ("model saved")
 
+        self.sess.close()
+
+    def validation(self, img_query, img_database, R=100):
+        C_tmp = self.sess.run(self.C)
+        print ("%s #validation# start validation" % (datetime.now()))
+        query_batch = int(ceil(img_query.n_samples / self.batch_size))
+        print ("%s #validation# totally %d query in %d batches" % (datetime.now(), img_query.n_samples, query_batch))
+        for i in xrange(query_batch):
+            images, labels, codes = img_query.next_batch(self.batch_size)
+
+            output, loss = self.sess.run([self.img_last_layer, self.cos_loss],
+                                   feed_dict={self.img: images, self.img_label: labels})
+            img_query.feed_batch_output(self.batch_size, output)
+            print('Cosine Loss: %s'%loss)
+
+        database_batch = int(ceil(img_database.n_samples / self.batch_size))
+        print ("%s #validation# totally %d database in %d batches" % (datetime.now(), img_database.n_samples, database_batch))
+        for i in xrange(database_batch):
+            images, labels, codes = img_database.next_batch(self.batch_size)
+
+            output, loss = self.sess.run([self.img_last_layer, self.cos_loss],
+                                   feed_dict={self.img: images, self.img_label: labels})
+            img_database.feed_batch_output(self.batch_size, output)
+            #print output[:10, :10]
+            if i % 100 == 0:
+                print('Cosine Loss[%d/%d]: %s'%(i, database_batch, loss))
+
+        self.update_codes_batch(img_query, self.code_batch_size)
+        self.update_codes_batch(img_database, self.code_batch_size)
+
+        print ("%s #validation# calculating MAP@%d" % (datetime.now(), R))
+        C_tmp = self.sess.run(self.C)
+        ## save features and codes
+        self.save_codes(img_database, img_query, C_tmp)
+
+        mAPs = MAPs_CQ(C_tmp, self.subspace_num, self.subcenter_num, R)
+
+        word_dict = np.loadtxt(self.wordvec_dict, dtype=float)
+        self.sess.close()
+        return {
+            'i2i_nocq': mAPs.get_mAPs_by_feature(img_database, img_query),
+            'i2i_AQD': mAPs.get_mAPs_AQD(img_database, img_query),
+            'i2i_SQD': mAPs.get_mAPs_SQD(img_database, img_query),
+            'i2i_CLS': mAPs.get_mAPs_cls(img_database, word_dict)
+        }
 
 def train(train_img, config):
-    model = DVSQ(config)
+    model = DVSQ(config, 'train')
     img_dataset = Dataset(train_img, config['output_dim'], config['n_subspace'] * config['n_subcenter'])
     model.train_cq(img_dataset)
     return model.save_dir
+
+def validation(database_img, query_img, config):
+    model = DVSQ(config, 'val')
+    img_database = Dataset(database_img, config['output_dim'], config['n_subspace'] * config['n_subcenter'])
+    img_query = Dataset(query_img, config['output_dim'], config['n_subspace'] * config['n_subcenter'])
+    return model.validation(img_query, img_database, config['R'])
+
