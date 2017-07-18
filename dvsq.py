@@ -1,10 +1,11 @@
-##################################################################################
+#################################################################################
 # Deep Visual-Semantic Quantization for Efficient Image Retrieval                #
 # Authors: Yue Cao, Mingsheng Long, Jianmin Wang, Shichen Liu                    #
 # Contact: caoyue10@gmail.com                                                    #
 ##################################################################################
 
 import os
+import shutil
 import sys
 import tensorflow as tf
 import numpy as np
@@ -16,12 +17,13 @@ import random
 from util import ProgressBar, Dataset, MAPs, MAPs_CQ
 from sklearn.cluster import MiniBatchKMeans
 
+
 class DVSQ(object):
-    def __init__(self, config):
+    def __init__(self, config, stage):
         ### Initialize setting
         print ("initializing")
         np.set_printoptions(precision=4)
-        self.stage = config['stage']
+        self.stage = stage
         self.device = config['device']
         self.output_dim = config['output_dim']
         self.n_class = config['label_dim']
@@ -32,9 +34,8 @@ class DVSQ(object):
         self.cq_lambda = config['cq_lambda']
         self.max_iter_update_Cb = config['max_iter_update_Cb']
         self.max_iter_update_b = config['max_iter_update_b']
-        #self.centers_device = config['centers_device']
 
-        self.batch_size = config['batch_size']
+        self.batch_size = config['batch_size'] if self.stage == "train" else config['val_batch_size']
         self.max_iter = config['max_iter']
         self.img_model = config['img_model']
         self.loss_type = config['loss_type']
@@ -42,17 +43,17 @@ class DVSQ(object):
         self.learning_rate_decay_factor = config['learning_rate_decay_factor']
         self.decay_step = config['decay_step']
 
-        self.margin_param = config['margin_param']
-        self.wordvec_dict = config['wordvec_dict']
-        self.part_ids_dict = config['part_ids_dict']
-        self.partlabel = config['partlabel']
-        ### Format as 'path/to/save/dir/lr_{$0}_output_dim{$1}_iter_{$2}'
-        self.save_dir = config['save_dir'] + self.loss_type + '_lr_' + str(self.learning_rate) + '_cqlambda_'+ str(self.cq_lambda) + '_subspace_' + str(self.subspace_num) + '_margin_' + str(self.margin_param) + '_partlabel_' + str(self.partlabel) + '_iter_' + str(self.max_iter) + '_' + str(self.output_dim) + '_.npz'
+        self.finetune_all = config['finetune_all']
 
-        ### Graph laplacian
-        self.graph_laplacian_temperature = config['graph_laplacian_temperature']
-        self.graph_laplacian_k = config['graph_laplacian_k']
-        self.graph_laplacian_lambda = config['graph_laplacian_lambda']
+        self.wordvec_dict = config['wordvec_dict']
+
+        self.file_name = 'lr_{}_cqlambda_{}_subspace_num_{}_dataset_{}'.format(
+                self.learning_rate,
+                self.cq_lambda,
+                self.subspace_num,
+                config['dataset'])
+        self.save_dir = os.path.join(config['save_dir'], self.file_name + '.npy')
+        self.log_dir = config['log_dir']
 
         ### Setup session
         print ("launching session")
@@ -60,7 +61,6 @@ class DVSQ(object):
         configProto.gpu_options.allow_growth = True
         configProto.allow_soft_placement = True
         self.sess = tf.Session(config=configProto)
-        self.model_weights = config['model_weights']
 
         ### Create variables and placeholders
 
@@ -68,8 +68,11 @@ class DVSQ(object):
             self.img = tf.placeholder(tf.float32, [self.batch_size, 256, 256, 3])
             self.img_label = tf.placeholder(tf.float32, [self.batch_size, self.n_class])
 
-            self.img_last_layer, self.img_output, self.C = \
-                self.load_model(self.model_weights)
+            if self.stage == 'train':
+                model_weights = config['model_weights']
+            else:
+                model_weights = self.save_dir
+            self.img_last_layer, self.img_output, self.C = self.load_model(model_weights)
 
             ### Centers shared in different modalities (image & text)
             ### Binary codes for different modalities (image & text)
@@ -123,19 +126,23 @@ class DVSQ(object):
         width = IMAGE_SIZE
 
         ### Randomly crop a [height, width] section of each image
-        distorted_image1 = tf.stack([tf.image.crop_to_bounding_box(tf.image.flip_left_right(each_image), 0, 0, height, width) for each_image in tf.unstack(reshaped_image)])
-        distorted_image2 = tf.stack([tf.image.crop_to_bounding_box(tf.image.flip_left_right(each_image), 28, 28, height, width) for each_image in tf.unstack(reshaped_image)])
-        distorted_image3 = tf.stack([tf.image.crop_to_bounding_box(tf.image.flip_left_right(each_image), 28, 0, height, width) for each_image in tf.unstack(reshaped_image)])
-        distorted_image4 = tf.stack([tf.image.crop_to_bounding_box(tf.image.flip_left_right(each_image), 0, 28, height, width) for each_image in tf.unstack(reshaped_image)])
-        distorted_image5 = tf.stack([tf.image.crop_to_bounding_box(tf.image.flip_left_right(each_image), 14, 14, height, width) for each_image in tf.unstack(reshaped_image)])
+        if self.stage == "train":
+            distorted_image = tf.stack([tf.random_crop(tf.image.random_flip_left_right(each_image), [height, width, 3]) for each_image in tf.unstack(reshaped_image)])
+        else:
+            ### Randomly crop a [height, width] section of each image
+            distorted_image1 = tf.stack([tf.image.crop_to_bounding_box(tf.image.flip_left_right(each_image), 0, 0, height, width) for each_image in tf.unstack(reshaped_image)])
+            distorted_image2 = tf.stack([tf.image.crop_to_bounding_box(tf.image.flip_left_right(each_image), 28, 28, height, width) for each_image in tf.unstack(reshaped_image)])
+            distorted_image3 = tf.stack([tf.image.crop_to_bounding_box(tf.image.flip_left_right(each_image), 28, 0, height, width) for each_image in tf.unstack(reshaped_image)])
+            distorted_image4 = tf.stack([tf.image.crop_to_bounding_box(tf.image.flip_left_right(each_image), 0, 28, height, width) for each_image in tf.unstack(reshaped_image)])
+            distorted_image5 = tf.stack([tf.image.crop_to_bounding_box(tf.image.flip_left_right(each_image), 14, 14, height, width) for each_image in tf.unstack(reshaped_image)])
 
-        distorted_image6 = tf.stack([tf.image.crop_to_bounding_box(each_image, 0, 0, height, width) for each_image in tf.unstack(reshaped_image)])
-        distorted_image7 = tf.stack([tf.image.crop_to_bounding_box(each_image, 28, 28, height, width) for each_image in tf.unstack(reshaped_image)])
-        distorted_image8 = tf.stack([tf.image.crop_to_bounding_box(each_image, 28, 0, height, width) for each_image in tf.unstack(reshaped_image)])
-        distorted_image9 = tf.stack([tf.image.crop_to_bounding_box(each_image, 0, 28, height, width) for each_image in tf.unstack(reshaped_image)])
-        distorted_image0 = tf.stack([tf.image.crop_to_bounding_box(each_image, 14, 14, height, width) for each_image in tf.unstack(reshaped_image)])
+            distorted_image6 = tf.stack([tf.image.crop_to_bounding_box(each_image, 0, 0, height, width) for each_image in tf.unstack(reshaped_image)])
+            distorted_image7 = tf.stack([tf.image.crop_to_bounding_box(each_image, 28, 28, height, width) for each_image in tf.unstack(reshaped_image)])
+            distorted_image8 = tf.stack([tf.image.crop_to_bounding_box(each_image, 28, 0, height, width) for each_image in tf.unstack(reshaped_image)])
+            distorted_image9 = tf.stack([tf.image.crop_to_bounding_box(each_image, 0, 28, height, width) for each_image in tf.unstack(reshaped_image)])
+            distorted_image0 = tf.stack([tf.image.crop_to_bounding_box(each_image, 14, 14, height, width) for each_image in tf.unstack(reshaped_image)])
 
-        distorted_image = tf.concat([distorted_image1, distorted_image2, distorted_image3, distorted_image4, distorted_image5, distorted_image6, distorted_image7, distorted_image8, distorted_image9, distorted_image0], 0)
+            distorted_image = tf.concat([distorted_image1, distorted_image2, distorted_image3, distorted_image4, distorted_image5, distorted_image6, distorted_image7, distorted_image8, distorted_image9, distorted_image0], 0)
 
         ### Zero-mean input
         with tf.name_scope('preprocess') as scope:
@@ -293,7 +300,12 @@ class DVSQ(object):
                 fc8b = tf.Variable(tf.constant(0.0, shape=[self.output_dim],
                                                dtype=tf.float32), name='biases')
             fc8l = tf.nn.bias_add(tf.matmul(self.fc7, fc8w), fc8b)
-            self.fc8_t = tf.nn.tanh(fc8l)
+            if self.stage == "train":
+                self.fc8 = tf.nn.tanh(fc8l)
+            else:
+                self.fc8_t = tf.nn.tanh(fc8l)
+                fc8_t = tf.concat([tf.expand_dims(i, 0) for i in tf.split(self.fc8_t, 10, 0)], 0)
+                self.fc8 = tf.reduce_mean(fc8_t, 0)
             fc8lo = tf.nn.bias_add(tf.matmul(self.fc7o, fc8w), fc8b)
             self.fc8o = tf.nn.tanh(fc8lo)
             self.deep_param_img['fc8'] = [fc8w, fc8b]
@@ -307,9 +319,6 @@ class DVSQ(object):
                                     minval = -1, maxval = 1, dtype = tf.float32, name = 'centers'))
 
         self.deep_param_img['C'] = self.centers
-
-        fc8_t = tf.concat([tf.expand_dims(i, 0) for i in tf.split(self.fc8_t, 10, 0)], 0)
-        self.fc8 = tf.reduce_mean(fc8_t, 0)
 
         print("img modal loading finished")
         ### Return outputs
@@ -344,7 +353,6 @@ class DVSQ(object):
         if self.loss_type == 'cos_margin_multi_label':
             assert self.output_dim == 300
             word_dict = tf.constant(np.loadtxt(self.wordvec_dict), dtype=tf.float32)
-            ids_dict = tf.constant(np.loadtxt(self.part_ids_dict), shape=[1,self.n_class], dtype=tf.float32)
             margin_param = tf.constant(self.margin_param, dtype=tf.float32)
 
             # N: batchsize, L: label_dim, D: 300
@@ -358,6 +366,7 @@ class DVSQ(object):
             # mod_1: N * L
             v_label_mod = tf.multiply(tf.expand_dims(tf.ones([self.batch_size, self.n_class]), 2), tf.expand_dims(word_dict, 0))
             mod_1 = tf.sqrt(tf.multiply(tf.expand_dims(tf.reduce_sum(tf.square(self.img_last_layer), 1), 1), tf.reduce_sum(tf.square(v_label_mod), 2)))
+            #mod_1 = tf.where(tf.less(mod_1_1, tf.constant(0.0000001)), tf.ones([self.batch_size, self.n_class]), mod_1_1)
             # cos_1: N * L
             cos_1 = tf.div(ip_1, mod_1)
 
@@ -366,6 +375,7 @@ class DVSQ(object):
             def reduce_shaper(t):
                 return tf.reshape(tf.reduce_sum(t, 1), [tf.shape(t)[0], 1])
             mod_2 = tf.sqrt(tf.matmul(reduce_shaper(tf.square(self.img_last_layer)), reduce_shaper(tf.square(word_dict)), transpose_b=True))
+            # mod_2 = tf.where(tf.less(mod_2_2, tf.constant(0.0000001)), tf.ones([self.batch_size, self.n_class]), mod_2_2)
             # cos_2: N * L
             cos_2 = tf.div(ip_2, mod_2)
 
@@ -397,10 +407,11 @@ class DVSQ(object):
             cos_1 = tf.div(ip_1, mod_1)
 
             ip_2 = tf.matmul(self.img_last_layer, word_dict, transpose_b=True)
+            # multiply ids to inner product
             def reduce_shaper(t):
                 return tf.reshape(tf.reduce_sum(t, 1), [tf.shape(t)[0], 1])
-            mod_2_2 = tf.sqrt(tf.matmul(reduce_shaper(tf.square(self.img_last_layer)), reduce_shaper(tf.square(word_dict)), transpose_b=True))
-            mod_2 = tf.where(tf.less(mod_2_2, tf.constant(0.0000001)), tf.ones([self.batch_size, self.n_class]), mod_2_2)
+            mod_2= tf.sqrt(tf.matmul(reduce_shaper(tf.square(self.img_last_layer)), reduce_shaper(tf.square(word_dict)), transpose_b=True))
+            # mod_2 = tf.where(tf.less(mod_2_2, tf.constant(0.0000001)), tf.ones([self.batch_size, self.n_class]), mod_2_2)
             # cos_2: N * L
             cos_2 = tf.div(ip_2, mod_2)
 
@@ -413,42 +424,19 @@ class DVSQ(object):
             margin_param = tf.subtract(tf.constant(1.0, dtype=tf.float32), tf.div(ip_3, mod_3))
 
             # cos - cos: N * L * L
-            cos_cos_1 = tf.subtract(tf.expand_dims(margin_param, 0), tf.subtract(tf.expand_dims(cos_1, 2), tf.expand_dims(cos_2, 1)))
+            cos_cos_1 = tf.subtract(tf.expand_dims(margin_param, 0), tf.subtract(tf.expand_dims(cos_2, 2), tf.expand_dims(cos_2, 1)))
             # we need to let the wrong place be 0
             cos_cos = tf.multiply(cos_cos_1, tf.expand_dims(self.img_label, 2))
 
             cos_loss = tf.reduce_sum(tf.maximum(tf.constant(0, dtype=tf.float32), cos_cos))
             self.cos_loss = tf.div(cos_loss, tf.multiply(tf.constant(self.n_class, dtype=tf.float32), tf.reduce_sum(self.img_label)))
 
-        # get knn
-        # TODO: use cos distance
-        # distance: N * N
-        # indices: N * K
-        # full_indices: (N*K) * 2
-        # W: N * N
-        def mod(x):
-            return tf.sqrt(tf.reduce_sum(tf.square(x), -1))
-        distance = mod(tf.expand_dims(self.img_last_layer, 1) - tf.expand_dims(self.img_last_layer, 0))
-        _, indices = tf.nn.top_k(tf.negative(distance), k=self.graph_laplacian_k + 1, sorted=True)
-        my_range = tf.expand_dims(tf.range(0, self.batch_size), 1)  # will be [[0], [1], ..., [N]]
-        my_range_repeated = tf.tile(my_range, [1, self.graph_laplacian_k + 1])
-        full_indices = tf.concat([tf.expand_dims(my_range_repeated, 2), tf.expand_dims(indices, 2)], 2)  # change shapes to [N, k, 1] and [N, k, 1], to concatenate into [N, k, 2]
-        full_indices = tf.reshape(full_indices, [-1, 2])
-        W = tf.sparse_to_dense(full_indices, [self.batch_size, self.batch_size], 1.0, default_value=0., validate_indices=False)
-        W = tf.stop_gradient(W)
-
-        exp = tf.exp(cos_1 / self.graph_laplacian_temperature) # N * L
-        D = exp / tf.expand_dims(tf.reduce_sum(exp, 1), 1) # N * L
-        D_square = tf.reduce_sum(tf.square(tf.expand_dims(D, 1) - tf.expand_dims(D, 0))) # N * N
-        self.graph_laplacian_loss = tf.reduce_sum(W * D_square) / (self.batch_size * self.graph_laplacian_k) * self.graph_laplacian_lambda
-
-
         self.precq_loss_img = tf.reduce_mean(tf.reduce_sum(tf.square(tf.subtract(self.img_last_layer, tf.matmul(self.b_img, self.C))), 1))
         word_dict = tf.constant(np.loadtxt(self.wordvec_dict), dtype=tf.float32)
         self.cq_loss_img = tf.reduce_mean(tf.reduce_sum(tf.square(tf.matmul(tf.subtract(self.img_last_layer, tf.matmul(self.b_img, self.C)), tf.transpose(word_dict))), 1))
         self.q_lambda = tf.Variable(self.cq_lambda, name='cq_lambda')
         self.cq_loss = tf.multiply(self.q_lambda, self.cq_loss_img)
-        self.loss = self.cos_loss + self.cq_loss + self.graph_laplacian_loss
+        self.loss = self.cos_loss + self.cq_loss
 
         ### Last layer has a 10 times learning rate
         self.lr = tf.train.exponential_decay(self.learning_rate, global_step, self.decay_step, self.learning_rate_decay_factor, staircase=True)
@@ -457,26 +445,39 @@ class DVSQ(object):
         fcgrad, _ = grads_and_vars[-2]
         fbgrad, _ = grads_and_vars[-1]
 
-        return opt.apply_gradients([(grads_and_vars[0][0], self.train_layers[0]),
-                                    (grads_and_vars[1][0]*2, self.train_layers[1]),
-                                    (grads_and_vars[2][0], self.train_layers[2]),
-                                    (grads_and_vars[3][0]*2, self.train_layers[3]),
-                                    (grads_and_vars[4][0], self.train_layers[4]),
-                                    (grads_and_vars[5][0]*2, self.train_layers[5]),
-                                    (grads_and_vars[6][0], self.train_layers[6]),
-                                    (grads_and_vars[7][0]*2, self.train_layers[7]),
-                                    (grads_and_vars[8][0], self.train_layers[8]),
-                                    (grads_and_vars[9][0]*2, self.train_layers[9]),
-                                    (grads_and_vars[10][0], self.train_layers[10]),
-                                    (grads_and_vars[11][0]*2, self.train_layers[11]),
-                                    (grads_and_vars[12][0], self.train_layers[12]),
-                                    (grads_and_vars[13][0]*2, self.train_layers[13]),
-                                    (fcgrad*10, self.train_last_layer[0]),
-                                    (fbgrad*20, self.train_last_layer[1])], global_step=global_step)
+        # for debug
+        self.grads_and_vars = grads_and_vars
+        tf.summary.scalar('loss', self.loss)
+        tf.summary.scalar('cos_loss', self.cos_loss)
+        tf.summary.scalar('cq_loss', self.cq_loss)
+        tf.summary.scalar('lr', self.lr)
+        self.merged = tf.summary.merge_all()
+
+
+        if self.stage == "train" and self.finetune_all:
+            return opt.apply_gradients([(grads_and_vars[0][0], self.train_layers[0]),
+                                        (grads_and_vars[1][0]*2, self.train_layers[1]),
+                                        (grads_and_vars[2][0], self.train_layers[2]),
+                                        (grads_and_vars[3][0]*2, self.train_layers[3]),
+                                        (grads_and_vars[4][0], self.train_layers[4]),
+                                        (grads_and_vars[5][0]*2, self.train_layers[5]),
+                                        (grads_and_vars[6][0], self.train_layers[6]),
+                                        (grads_and_vars[7][0]*2, self.train_layers[7]),
+                                        (grads_and_vars[8][0], self.train_layers[8]),
+                                        (grads_and_vars[9][0]*2, self.train_layers[9]),
+                                        (grads_and_vars[10][0], self.train_layers[10]),
+                                        (grads_and_vars[11][0]*2, self.train_layers[11]),
+                                        (grads_and_vars[12][0], self.train_layers[12]),
+                                        (grads_and_vars[13][0]*2, self.train_layers[13]),
+                                        (fcgrad*10, self.train_last_layer[0]),
+                                        (fbgrad*20, self.train_last_layer[1])], global_step=global_step)
+        else:
+            return opt.apply_gradients([(fcgrad*10, self.train_last_layer[0]),
+                                        (fbgrad*20, self.train_last_layer[1])], global_step=global_step)
 
     def initial_centers(self, img_output):
         C_init = np.zeros([self.subspace_num * self.subcenter_num, self.output_dim])
-        print "#ZDQ train# initilizing Centers"
+        print "#DVSQ train# initilizing Centers"
         all_output = img_output
         for i in xrange(self.subspace_num):
             kmeans = MiniBatchKMeans(n_clusters=self.subcenter_num).fit(all_output[:, i * self.output_dim / self.subspace_num: (i + 1) * self.output_dim / self.subspace_num])
@@ -512,11 +513,6 @@ class DVSQ(object):
         C_value[C_zeros_ids, :] = old_C_value[C_zeros_ids, :]
         self.sess.run(self.C.assign(C_value))
 
-        print 'updated C is:'
-        print C_value
-        print "non zeros:"
-        print len(np.where(np.sum(C_value, 1) != 0)[0])
-
     def update_codes_ICM(self, output, code):
         '''
         Optimize:
@@ -540,7 +536,6 @@ class DVSQ(object):
             sub_list = [i for i in range(self.subspace_num)]
             random.shuffle(sub_list)
             for m in sub_list:
-
                 best_centers_one_hot_val = self.sess.run(self.ICM_best_centers_one_hot, feed_dict = {
                     self.ICM_b_m: code[:, m * self.subcenter_num: (m + 1) * self.subcenter_num],
                     self.ICM_b_all: code,
@@ -556,8 +551,6 @@ class DVSQ(object):
         update codes in batch size
         '''
         total_batch = int(ceil(dataset.n_samples / batch_size))
-        print "start update codes in batch size ", batch_size
-
         dataset.finish_epoch()
 
         for i in xrange(total_batch):
@@ -565,10 +558,58 @@ class DVSQ(object):
             codes_val = self.update_codes_ICM(output_val, code_val)
             dataset.feed_batch_codes(batch_size, codes_val)
 
-        print "update_code wrong:"
-        print np.sum(np.sum(dataset.codes, 1) != 4)
+    def train_cq(self, img_dataset):
+        print ("%s #train# start training" % datetime.now())
+        epoch = 0
+        epoch_iter = int(ceil(img_dataset.n_samples / self.batch_size))
 
-        print "######### update codes done ##########"
+        ### tensorboard
+        tflog_path = os.path.join(self.log_dir, self.file_name)
+        if os.path.exists(tflog_path):
+            shutil.rmtree(tflog_path)
+        train_writer = tf.summary.FileWriter(tflog_path, self.sess.graph)
+
+        for train_iter in xrange(self.max_iter):
+            images, labels, codes = img_dataset.next_batch(self.batch_size)
+            start_time = time.time()
+
+            if epoch > 0:
+                assign_lambda = self.q_lambda.assign(self.cq_lambda)
+            else:
+                assign_lambda = self.q_lambda.assign(0.0)
+            self.sess.run([assign_lambda])
+
+
+            _, loss, output, summary = self.sess.run([self.train_op, self.loss, self.img_last_layer, self.merged],
+                                    feed_dict={self.img: images,
+                                               self.img_label: labels,
+                                               self.b_img: codes})
+
+            train_writer.add_summary(summary, train_iter)
+
+            img_dataset.feed_batch_output(self.batch_size, output)
+            duration = time.time() - start_time
+
+            # every epoch: update codes and centers
+            if train_iter % (2*epoch_iter) == 0 and train_iter != 0:
+                if epoch == 0:
+                    with tf.device(self.device):
+                        for i in xrange(self.max_iter_update_Cb):
+                            self.sess.run(self.C.assign(self.initial_centers(img_dataset.output)))
+
+                epoch = epoch + 1
+                for i in xrange(self.max_iter_update_Cb):
+                    self.update_codes_batch(img_dataset, self.code_batch_size)
+                    self.update_centers(img_dataset)
+            if train_iter % 50 == 0:
+                print("%s #train# step %4d, loss = %.4f, %.1f sec/batch"
+                        %(datetime.now(), train_iter+1, loss, duration))
+
+        print ("%s #traing# finish training" % datetime.now())
+        self.save_model()
+        print ("model saved")
+
+        self.sess.close()
 
     def validation(self, img_query, img_database, R=100):
         C_tmp = self.sess.run(self.C)
@@ -606,6 +647,7 @@ class DVSQ(object):
         mAPs = MAPs_CQ(C_tmp, self.subspace_num, self.subcenter_num, R)
 
         word_dict = np.loadtxt(self.wordvec_dict, dtype=float)
+        self.sess.close()
         return {
             'i2i_nocq': mAPs.get_mAPs_by_feature(img_database, img_query),
             'i2i_AQD': mAPs.get_mAPs_AQD(img_database, img_query),
@@ -613,9 +655,15 @@ class DVSQ(object):
             'i2i_CLS': mAPs.get_mAPs_cls(img_database, word_dict)
         }
 
+def train(train_img, config):
+    model = DVSQ(config, 'train')
+    img_dataset = Dataset(train_img, config['output_dim'], config['n_subspace'] * config['n_subcenter'])
+    model.train_cq(img_dataset)
+    return model.save_dir
 
 def validation(database_img, query_img, config):
-    model = DVSQ(config)
+    model = DVSQ(config, 'val')
     img_database = Dataset(database_img, config['output_dim'], config['n_subspace'] * config['n_subcenter'])
     img_query = Dataset(query_img, config['output_dim'], config['n_subspace'] * config['n_subcenter'])
     return model.validation(img_query, img_database, config['R'])
+

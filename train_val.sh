@@ -20,5 +20,4 @@ filename="lr_${lr}_cqlambda_${q_lambda}_subspace_num_${subspace_num}_T_${T}_K_${
 model_file="models/${filename}.npy"
 export TF_CPP_MIN_LOG_LEVEL=3
 #                           lr  output  iter    q_lamb      n_sub   gl_loss     dataset     gpu    T       K   gl_lambda    log_dir
-echo "python train_script.py      $lr 300     500     $q_lambda   4       $gl_loss    $dataset    $gpu   $T     $K   $gl_lambda   $log_dir"
-# python validation_script.py ${model_file} $gpu $dataset
+python train_val_script.py      $lr 300     5     $q_lambda   4       $gl_loss    $dataset    $gpu   $T     $K   $gl_lambda   $log_dir
