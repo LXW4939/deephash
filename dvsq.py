@@ -69,10 +69,10 @@ class DVSQ(object):
             self.img_label = tf.placeholder(tf.float32, [self.batch_size, self.n_class])
 
             if self.stage == 'train':
-                model_weights = config['model_weights']
+                self.model_weights = config['model_weights']
             else:
-                model_weights = self.save_dir
-            self.img_last_layer, self.img_output, self.C = self.load_model(model_weights)
+                self.model_weights = self.save_dir
+            self.img_last_layer, self.img_output, self.C = self.load_model(self.model_weights)
 
             ### Centers shared in different modalities (image & text)
             ### Binary codes for different modalities (image & text)

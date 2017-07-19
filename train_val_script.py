@@ -70,7 +70,7 @@ config = {
 pprint(config)
 
 train_img = dataset.import_train(config)
-model_dq = model.train(train_img, config)
+# model_dq = model.train(train_img, config)
 
 query_img, database_img = dataset.import_validation(config)
 model.validation(database_img, query_img, config)
