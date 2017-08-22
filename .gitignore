@@ -107,3 +107,4 @@ models
 pretrained_model
 *.DS_Store
 useless
+.idea
