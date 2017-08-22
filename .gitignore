@@ -105,6 +105,6 @@ tflog*
 data/cifar10/
 models
 pretrained_model
-*.DS_Store
+.DS_Store
 useless
 .idea
