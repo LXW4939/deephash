@@ -11,7 +11,7 @@ idna==2.5
 ipaddress==1.0.18
 ipython==5.3.0
 ipython-genutils==0.2.0
-Mako==1.0.6
+Mako==1.2.2
 Markdown==2.6.8
 MarkupSafe==0.23
 mock==2.0.0
